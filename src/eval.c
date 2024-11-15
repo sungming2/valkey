@@ -203,6 +203,7 @@ void scriptingInit(int setup) {
      * sha with the dictionary, so free fn is not set. */
     lctx.lua_scripts = dictCreate(&shaScriptObjectDictType);
     lctx.lua_scripts_lru_list = listCreate();
+    listSetFreeMethod(lctx.lua_scripts_lru_list, (void (*)(void *))sdsfree);
     lctx.lua_scripts_mem = 0;
 
     luaRegisterServerAPI(lua);
@@ -517,10 +518,7 @@ void luaDeleteFunction(client *c, sds sha) {
     /* Delete the script from server. */
     dictEntry *de = dictUnlink(lctx.lua_scripts, sha);
     serverAssertWithInfo(c ? c : lctx.lua_client, NULL, de);
-    luaScript *l = dictGetVal(de);
-    /* We only delete `EVAL` scripts, which must exist in the LRU list. */
-    serverAssert(l->node);
-    listDelNode(lctx.lua_scripts_lru_list, l->node);
+    luaScript *l = dictGetVal(de);    
     lctx.lua_scripts_mem -= sdsAllocSize(sha) + getStringObjectSdsUsedMemory(l->body);
     dictFreeUnlinkedEntry(lctx.lua_scripts, de);
 }
@@ -549,11 +547,12 @@ listNode *luaScriptsLRUAdd(client *c, sds sha, int evalsha) {
         listNode *ln = listFirst(lctx.lua_scripts_lru_list);
         sds oldest = listNodeValue(ln);
         luaDeleteFunction(c, oldest);
+        listDelNode(lctx.lua_scripts_lru_list, ln);
         server.stat_evictedscripts++;
     }
 
     /* Add current. */
-    listAddNodeTail(lctx.lua_scripts_lru_list, sha);
+    listAddNodeTail(lctx.lua_scripts_lru_list, sdsdup(sha));
     return listLast(lctx.lua_scripts_lru_list);
 }
 
