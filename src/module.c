@@ -4097,7 +4097,6 @@ static void moduleInitKey(ValkeyModuleKey *kp, ValkeyModuleCtx *ctx, robj *keyna
     kp->ctx = ctx;
     kp->db = ctx->client->db;
     kp->key = keyname;
-    incrRefCount(keyname);
     kp->value = value;
     kp->iter = NULL;
     kp->mode = mode;
@@ -4196,7 +4195,7 @@ static void moduleCloseKey(ValkeyModuleKey *key) {
 
 /* Close a key handle. */
 void VM_CloseKey(ValkeyModuleKey *key) {
-    if (key == NULL) return;
+    if (key == NULL || key->key == NULL || key->key->refcount == 0) return;
     moduleCloseKey(key);
     autoMemoryFreed(key->ctx, VALKEYMODULE_AM_KEY, key);
     zfree(key);
