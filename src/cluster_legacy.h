@@ -54,6 +54,7 @@ typedef struct clusterLink {
 #define CLUSTER_NODE_EXTENSIONS_SUPPORTED (1 << 10)        /* This node supports extensions. */
 #define CLUSTER_NODE_LIGHT_HDR_PUBLISH_SUPPORTED (1 << 11) /* This node supports light message header for publish type. */
 #define CLUSTER_NODE_LIGHT_HDR_MODULE_SUPPORTED (1 << 12)  /* This node supports light message header for module type. */
+#define CLUSTER_NODE_RESET (1 << 13)
 #define CLUSTER_NODE_NULL_NAME                                                                                         \
     "\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000" \
     "\000\000\000\000\000\000\000\000\000\000\000\000"
@@ -97,6 +98,7 @@ typedef struct clusterNodeFailReport {
 #define CLUSTERMSG_TYPE_MODULE 9                /* Module cluster API message. */
 #define CLUSTERMSG_TYPE_PUBLISHSHARD 10         /* Pub/Sub Publish shard propagation */
 #define CLUSTERMSG_TYPE_COUNT 11                /* Total number of message types. */
+#define CLUSTERMSG_TYPE_FORGET_ME 12
 
 #define CLUSTERMSG_LIGHT 0x8000 /* Modifier bit for message types that support light header */
 

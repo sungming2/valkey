@@ -1808,6 +1808,8 @@ void clusterDelNode(clusterNode *delnode) {
 
     /* 4) Free the node, unlinking it from the cluster. */
     freeClusterNode(delnode);
+
+    clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
 }
 
 /* Node lookup by name */
@@ -2074,6 +2076,20 @@ int clusterBlacklistExists(char *nodeid) {
     retval = dictFind(server.cluster->nodes_black_list, id) != NULL;
     sdsfree(id);
     return retval;
+}
+
+void clusterBlacklistDeleteNodes(void) {
+    dictIterator *di;
+    dictEntry *de;
+
+    di = dictGetSafeIterator(server.cluster->nodes_black_list);
+    while ((de = dictNext(di)) != NULL) {
+        char *nodeid = dictGetKey(de);
+        clusterNode *node = clusterLookupNode(nodeid, CLUSTER_NAMELEN);
+
+        if (node) clusterDelNode(node);
+    }
+    dictReleaseIterator(di);
 }
 
 /* -----------------------------------------------------------------------------
@@ -2952,6 +2968,7 @@ void clusterProcessPingExtensions(clusterMsg *hdr, clusterLink *link) {
         } else if (type == CLUSTERMSG_EXT_TYPE_FORGOTTEN_NODE) {
             clusterMsgPingExtForgottenNode *forgotten_node_ext = &(ext->ext[0].forgotten_node);
             clusterNode *n = clusterLookupNode(forgotten_node_ext->name, CLUSTER_NAMELEN);
+            serverLog(LL_NOTICE, "Blacklist node: %.40s, ttl: %lu", forgotten_node_ext->name, ntohu64(forgotten_node_ext->ttl));
             if (n && n != myself && !(nodeIsReplica(myself) && myself->replicaof == n)) {
                 sds id = sdsnewlen(forgotten_node_ext->name, CLUSTER_NAMELEN);
                 dictEntry *de = dictAddOrFind(server.cluster->nodes_black_list, id);
@@ -3749,6 +3766,13 @@ int clusterProcessPacket(clusterLink *link) {
         clusterUpdateSlotsConfigWith(n, reportedConfigEpoch, hdr->data.update.nodecfg.slots);
     } else if (type == CLUSTERMSG_TYPE_MODULE) {
         clusterProcessModulePacket(&hdr->data.module.msg, sender);
+    } else if (type == CLUSTERMSG_TYPE_FORGET_ME) {
+        serverLog(LL_NOTICE, "Received FORGET ME message from %.40s", hdr->sender);
+        clusterNode *n = clusterLookupNode(hdr->sender, CLUSTER_NAMELEN);
+
+        if (n && n != myself && !(nodeIsReplica(myself) && myself->replicaof == n)) {
+            clusterBlacklistAddNode(n);
+        }
     } else {
         serverLog(LL_WARNING, "Received unknown packet type: %d", type);
     }
@@ -3956,9 +3980,10 @@ void clusterReadHandler(connection *conn) {
  * the link to be invalidated, so it is safe to call this function
  * from event handlers that will do stuff with the same link later. */
 void clusterSendMessage(clusterLink *link, clusterMsgSendBlock *msgblock) {
-    if (!link) {
+    if (!link || myself->flags & CLUSTER_NODE_RESET) {
         return;
     }
+
     if (listLength(link->send_msg_queue) == 0 && getMessageFromSendBlock(msgblock)->totlen != 0)
         connSetWriteHandlerWithBarrier(link->conn, clusterWriteHandler, 1);
 
@@ -5285,6 +5310,7 @@ void clusterCron(void) {
     mstime_t min_pong = 0, now = mstime();
     clusterNode *min_pong_node = NULL;
     static unsigned long long iteration = 0;
+    int all_nodes_empty_queue = 1;
 
     iteration++; /* Number of times this function was called so far. */
 
@@ -5423,8 +5449,21 @@ void clusterCron(void) {
                 }
             }
         }
+
+        if (node->link && listLength(node->link->send_msg_queue)) {
+            // if queue is not empty, set to 0
+            all_nodes_empty_queue = 0;
+        }
     }
     dictReleaseIterator(di);
+
+    if (myself->flags & CLUSTER_NODE_RESET && all_nodes_empty_queue) {
+        serverLog(LL_NOTICE, "Sent forget me messages. Now reset my cluster");
+        clusterReset(1);
+        myself->flags &= ~CLUSTER_NODE_RESET;
+    }
+
+    clusterBlacklistDeleteNodes();
 
     /* If we are a replica node but the replication is still turned off,
      * enable it if we know the address of our primary and it appears to
@@ -5459,7 +5498,6 @@ void clusterCron(void) {
  * a single time before replying to clients. */
 void clusterBeforeSleep(void) {
     int flags = server.cluster->todo_before_sleep;
-
     /* Reset our flags (not strictly needed since every single function
      * called for flags set should be able to clear its flag). */
     server.cluster->todo_before_sleep = 0;
@@ -7213,7 +7251,21 @@ int clusterCommandSpecial(client *c) {
         sds client = catClientInfoShortString(sdsempty(), c, server.hide_user_data_from_log);
         serverLog(LL_NOTICE, "Cluster reset (user request from '%s').", client);
         sdsfree(client);
-        clusterReset(hard);
+
+        if (hard) {
+            // Broadcast forget me message to others
+            uint32_t msglen = sizeof(clusterMsg) - sizeof(union clusterMsgData);
+            clusterMsgSendBlock *msgblock =
+                createClusterMsgSendBlock(CLUSTERMSG_TYPE_FORGET_ME, msglen);
+            clusterBroadcastMessage(msgblock);
+            clusterMsgSendBlockDecrRefCount(msgblock);
+            // SET FLAG
+            myself->flags |= CLUSTER_NODE_RESET;
+        } else {
+            // Soft reset
+            clusterReset(hard);
+        }
+
         addReply(c, shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr, "links") && c->argc == 2) {
         /* CLUSTER LINKS */
