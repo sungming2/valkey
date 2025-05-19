@@ -678,7 +678,7 @@ static client createClient(char *cmd, size_t len, client from, int thread_id) {
         const char *err = NULL;
         if (cliSecureConnection(c->context, config.sslconfig, &err) == VALKEY_ERR && err) {
             fprintf(stderr, "Could not negotiate a TLS connection: %s\n", err);
-            exit(1);
+            return NULL;
         }
     }
     c->thread_id = thread_id;
