@@ -244,7 +244,7 @@ static dictType dtype = {
 static valkeyContext *getValkeyContext(const char *ip, int port, const char *hostsocket) {
     valkeyContext *ctx = NULL;
     valkeyReply *reply = NULL;
-    struct timeval tv = {0};
+    struct timeval tv = {1, 0};
     if (hostsocket == NULL)
         ctx = valkeyConnectWrapper(ip, port, tv, 0);
     else
@@ -278,7 +278,7 @@ static valkeyContext *getValkeyContext(const char *ip, int port, const char *hos
                 fprintf(stderr, "Node %s replied with error:\n%s\n", hostsocket, reply->str);
             freeReplyObject(reply);
             valkeyFree(ctx);
-            exit(1);
+            return NULL;
         }
         freeReplyObject(reply);
         return ctx;
@@ -303,7 +303,7 @@ static serverConfig *getServerConfig(const char *ip, int port, const char *hosts
     c = getValkeyContext(ip, port, hostsocket);
     if (c == NULL) {
         freeServerConfig(cfg);
-        exit(1);
+        return NULL;
     }
     valkeyAppendCommand(c, "CONFIG GET %s", "save");
     valkeyAppendCommand(c, "CONFIG GET %s", "appendonly");
@@ -643,7 +643,7 @@ static client createClient(char *cmd, size_t len, client from, int thread_id) {
 
     const char *ip = NULL;
     int port = 0;
-    struct timeval tv = {0};
+    struct timeval tv = {1, 0};
     c->cluster_node = NULL;
     if (config.hostsocket == NULL || is_cluster_client) {
         if (!is_cluster_client) {
@@ -656,7 +656,8 @@ static client createClient(char *cmd, size_t len, client from, int thread_id) {
             else
                 node_idx = thread_id % config.cluster_node_count;
             clusterNode *node = config.cluster_nodes[node_idx];
-            assert(node != NULL);
+            if (!node || node->slots_count == 0 || !node->redis_config) return NULL;
+            // assert(node != NULL);
             ip = (const char *)node->ip;
             port = node->port;
             c->cluster_node = node;
@@ -837,7 +838,11 @@ static void createMissingClients(client c) {
     while (config.liveclients < config.numclients) {
         int thread_id = -1;
         if (config.num_threads) thread_id = config.liveclients % config.num_threads;
-        createClient(NULL, 0, c, thread_id);
+        client newc = createClient(NULL, 0, c, thread_id);
+        if (newc == NULL) {
+            atomic_fetch_add_explicit(&config.liveclients, 1, memory_order_relaxed);
+            continue;
+        }
 
         /* Listen backlog is quite limited on most systems */
         if (++n > 64) {
