@@ -1672,12 +1672,30 @@ clusterNode *createClusterNode(char *nodename, int flags) {
     node->tcp_port = 0;
     node->cport = 0;
     node->tls_port = 0;
-    node->fail_reports = listCreate();
+    node->failure_report_table = raxNew();
+    node->failure_report_dict = dictCreate(&clusterNodesDictType);
     node->orphaned_time = 0;
     node->repl_offset = 0;
-    listSetFreeMethod(node->fail_reports, zfree);
     node->is_node_healthy = 0;
     return node;
+}
+
+/* 8 bytes mstime + 8 bytes cluster node */
+#define FAILURE_REPORT_ST_KEYLEN 16
+
+/* Store a signed mstime_t expiry in the 8‑byte prefix */
+static void encodeFailureReportKey(unsigned char *buf, mstime_t expiry, clusterNode *node) {
+    uint64_t be = htonu64((uint64_t)expiry);
+    memcpy(buf, &be, 8);
+    memcpy(buf + 8, &node, sizeof(node));
+    if (sizeof(node) == 4) memset(buf + 12, 0, 4);
+}
+
+static void decodeFailureReportKey(unsigned char *buf, mstime_t *expiry_ptr, clusterNode **node_ptr) {
+    uint64_t be;
+    memcpy(&be, buf, 8);
+    *expiry_ptr = (mstime_t)ntohu64(be);
+    memcpy(node_ptr, buf + 8, sizeof(*node_ptr));
 }
 
 /* This function is called every time we get a failure report from a node.
@@ -1691,28 +1709,32 @@ clusterNode *createClusterNode(char *nodename, int flags) {
  * failure report from the same sender. 1 is returned if a new failure
  * report is created. */
 int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
-    list *l = failing->fail_reports;
-    listNode *ln;
-    listIter li;
-    clusterNodeFailReport *fr;
+    unsigned char buf[FAILURE_REPORT_ST_KEYLEN];
+    mstime_t expiry = mstime();
+    sds nodename = sdsnewlen(sender->name, CLUSTER_NAMELEN);
 
-    /* If a failure report from the same sender already exists, just update
-     * the timestamp. */
-    listRewind(l, &li);
-    mstime_t now = mstime();
-    while ((ln = listNext(&li)) != NULL) {
-        fr = ln->value;
-        if (fr->node == sender) {
-            fr->time = now;
-            return 0;
-        }
+    /* Check for an existing expiry */
+    mstime_t *old_ptr = dictFetchValue(failing->failure_report_dict, nodename);
+    if (old_ptr) {
+        encodeFailureReportKey(buf, *old_ptr, sender);
+        raxRemove(failing->failure_report_table, buf, sizeof(buf), NULL);
+
+        encodeFailureReportKey(buf, expiry, sender);
+        raxInsert(failing->failure_report_table, buf, sizeof(buf), NULL, NULL);
+
+        *old_ptr = expiry;
+        sdsfree(nodename);
+
+        return 0;
     }
 
-    /* Otherwise create a new report. */
-    fr = zmalloc(sizeof(*fr));
-    fr->node = sender;
-    fr->time = now;
-    listAddNodeTail(l, fr);
+    encodeFailureReportKey(buf, expiry, sender);
+    raxInsert(failing->failure_report_table, buf, sizeof(buf), NULL, NULL);
+
+    mstime_t *new_ptr = zmalloc(sizeof(*new_ptr));
+    *new_ptr = expiry;
+    dictAdd(failing->failure_report_dict, nodename, new_ptr);
+
     return 1;
 }
 
@@ -1725,24 +1747,37 @@ int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
  * If the reporting node loses its voting right during this time, we will
  * also clear its report. */
 void clusterNodeCleanupFailureReports(clusterNode *node) {
-    list *l = node->fail_reports;
-    if (!listLength(l)) return;
-
-    listNode *ln;
-    listIter li;
-    clusterNodeFailReport *fr;
-    mstime_t maxtime = server.cluster_node_timeout * CLUSTER_FAIL_REPORT_VALIDITY_MULT;
     mstime_t now = mstime();
+    mstime_t timeout = server.cluster_node_timeout * CLUSTER_FAIL_REPORT_VALIDITY_MULT;
+    mstime_t cutoff = now - timeout;
 
-    listRewind(l, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        fr = ln->value;
-        if (now - fr->time > maxtime) {
-            listDelNode(l, ln);
-        } else if (!clusterNodeIsVotingPrimary(fr->node)) {
-            listDelNode(l, ln);
-        }
+    raxIterator ri;
+    raxStart(&ri, node->failure_report_table);
+    raxSeek(&ri, "^", NULL, 0);
+
+    while (raxNext(&ri)) {
+        mstime_t report_time;
+        clusterNode *sender;
+        decodeFailureReportKey(ri.key, &report_time, &sender);
+
+        int too_old = report_time <= cutoff;
+        if (!too_old) break;
+
+        /* remove from dict */
+        sds nodename = sdsnewlen(sender->name, CLUSTER_NAMELEN);
+        mstime_t *expiry = dictFetchValue(node->failure_report_dict, nodename);
+        dictDelete(node->failure_report_dict, nodename);
+        zfree(expiry);
+        sdsfree(nodename);
+
+        /* remove from radix tree */
+        raxRemove(node->failure_report_table, ri.key, ri.key_len, NULL);
+
+        /* restart from the beginning */
+        raxSeek(&ri, "^", NULL, 0);
     }
+
+    raxStop(&ri);
 }
 
 /* Remove the failing report for 'node' if it was previously considered
@@ -1757,24 +1792,22 @@ void clusterNodeCleanupFailureReports(clusterNode *node) {
  * The function returns 1 if the failure report was found and removed.
  * Otherwise 0 is returned. */
 int clusterNodeDelFailureReport(clusterNode *node, clusterNode *sender) {
-    list *l = node->fail_reports;
-    if (!listLength(l)) return 0;
-
-    listNode *ln;
-    listIter li;
-    clusterNodeFailReport *fr;
-
-    /* Search for a failure report from this sender. */
-    listRewind(l, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        fr = ln->value;
-        if (fr->node == sender) break;
+    unsigned char buf[FAILURE_REPORT_ST_KEYLEN];
+    sds nodename = sdsnewlen(sender->name, CLUSTER_NAMELEN);
+    mstime_t *expiry_ptr = dictFetchValue(node->failure_report_dict, sender->name);
+    if (!expiry_ptr) {
+        sdsfree(nodename);
+        return 0;
     }
-    if (!ln) return 0; /* No failure report from this sender. */
+    /* Remove the entry from the radix tree */
+    encodeFailureReportKey(buf, *expiry_ptr, sender);
+    raxRemove(node->failure_report_table, buf, sizeof(buf), NULL);
 
-    /* Remove the failure report. */
-    listDelNode(l, ln);
-    clusterNodeCleanupFailureReports(node);
+    /* Remove and free the dict entry */
+    mstime_t *expiry = dictFetchValue(node->failure_report_dict, nodename);
+    dictDelete(node->failure_report_dict, sender->name);
+    zfree(expiry);
+    sdsfree(nodename);
     return 1;
 }
 
@@ -1783,7 +1816,7 @@ int clusterNodeDelFailureReport(clusterNode *node, clusterNode *sender) {
  * node as well. */
 int clusterNodeFailureReportsCount(clusterNode *node) {
     clusterNodeCleanupFailureReports(node);
-    return listLength(node->fail_reports);
+    return dictSize(node->failure_report_dict);
 }
 
 static int clusterNodeNameComparator(const void *node1, const void *node2) {
@@ -1856,7 +1889,15 @@ void freeClusterNode(clusterNode *n) {
     sdsfree(n->human_nodename);
     sdsfree(n->announce_client_ipv4);
     sdsfree(n->announce_client_ipv6);
-    listRelease(n->fail_reports);
+    dictIterator *di = dictGetIterator(n->failure_report_dict);
+    dictEntry *de;
+    while ((de = dictNext(di)) != NULL) {
+        void *val = dictGetVal(de);
+        zfree(val);
+    }
+    dictReleaseIterator(di);
+    dictRelease(n->failure_report_dict);
+    raxFree(n->failure_report_table);
     zfree(n->replicas);
     zfree(n);
 }

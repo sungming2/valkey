@@ -364,7 +364,9 @@ struct _clusterNode {
     int cport;                              /* Latest known cluster port of this node. */
     clusterLink *link;                      /* TCP/IP link established toward this node */
     clusterLink *inbound_link;              /* TCP/IP link accepted from this node */
-    list *fail_reports;                     /* List of nodes signaling this as failing */
+    /* per‑node failure‑report structures */
+    rax *failure_report_table;              /* sorted by expiry */
+    dict *failure_report_dict;              /* node‑name → expiry */
     int is_node_healthy;                    /* Boolean indicating the cached node health.
                                                Update with updateAndCountChangedNodeHealth(). */
 };
