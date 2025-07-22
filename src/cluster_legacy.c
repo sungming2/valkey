@@ -1690,14 +1690,17 @@ clusterNode *createClusterNode(char *nodename, int flags) {
  * 'failing' is the node that is in failure state according to the
  * 'sender' node.
  *
- * The function returns 0 if it just updates a timestamp of an existing
- * failure report from the same sender. 1 is returned if a new failure
- * report is created. */
+ * Return value:
+ *   0 - either the node was already failed, or an existing report was refreshed.
+ *   1 - a new failure report was created.
+ */
 int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
     list *l = failing->fail_reports;
     listNode *ln;
     listIter li;
     clusterNodeFailReport *fr;
+
+    if (nodeFailed(failing)) return 0;
 
     /* If a failure report from the same sender already exists, just update
      * the timestamp. */
