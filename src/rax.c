@@ -34,6 +34,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include "rax.h"
 #include "serverassert.h"
@@ -1819,13 +1820,22 @@ size_t raxAllocSize(rax *rax) {
  */
 
 /* The actual implementation of raxShow(). */
-void raxRecursiveShow(int level, int lpad, raxNode *n) {
+void raxRecursiveShow(int level, int lpad, raxNode *n, FILE *out) {
     char s = n->iscompr ? '"' : '[';
     char e = n->iscompr ? '"' : ']';
 
-    int numchars = printf("%c%.*s%c", s, n->size, n->data, e);
+    /* open bracket */
+    int numchars = fprintf(out, "%c", s);
+
+    /* hex‑dump the n->data bytes */
+    for (int i = 0; i < n->size; i++) {
+        numchars += fprintf(out, "%02X", (unsigned char)n->data[i]);
+    }
+
+    /* close bracket */
+    numchars += fprintf(out, "%c", e);
     if (n->iskey) {
-        numchars += printf("=%p", raxGetData(n));
+        numchars += fprintf(out, "=%p", raxGetData(n));
     }
 
     int numchildren = n->iscompr ? 1 : n->size;
@@ -1837,25 +1847,36 @@ void raxRecursiveShow(int level, int lpad, raxNode *n) {
     }
     raxNode **cp = raxNodeFirstChildPtr(n);
     for (int i = 0; i < numchildren; i++) {
-        char *branch = " `-(%c) ";
         if (numchildren > 1) {
-            printf("\n");
+            fprintf(out, "\n");
             for (int j = 0; j < lpad; j++) putchar(' ');
-            printf(branch, n->data[i]);
+            fprintf(out, " `-(%02X) ", (unsigned char)n->data[i]);
         } else {
-            printf(" -> ");
+            fprintf(out, " -> ");
         }
         raxNode *child;
         memcpy(&child, cp, sizeof(child));
-        raxRecursiveShow(level + 1, lpad, child);
+        raxRecursiveShow(level + 1, lpad, child, out);
         cp++;
     }
 }
 
 /* Show a tree, as outlined in the comment above. */
 void raxShow(rax *rax) {
-    raxRecursiveShow(0, 0, rax->head);
-    putchar('\n');
+    int fd = open("/home/ubuntu/valkey-rax.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd == -1) {
+        perror("open");
+        return;
+    }
+    FILE *f = fdopen(fd, "a");
+    if (!f) {
+        perror("fdopen");
+        return;
+    }
+    fprintf(f, "===========rax show============\n");
+    raxRecursiveShow(0, 0, rax->head, f);
+    fputc('\n', f);
+    fputc('\n', f);
 }
 
 /* Used by debugnode() macro to show info about a given node. */

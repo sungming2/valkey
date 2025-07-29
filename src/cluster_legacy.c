@@ -1733,6 +1733,14 @@ int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
     raxIterator ri;
     raxStart(&ri, failing->fail_reports);
     raxSeek(&ri, "^", NULL, 0);
+
+    if (failing->fail_reports->numele > 300) {
+        serverLog(LL_NOTICE,
+                  "==== RAX node debug ====  number of keys: %llu number of nodes: %llu",
+                  failing->fail_reports->numele, failing->fail_reports->numnodes);
+        raxShow(failing->fail_reports);
+    }
+
     while (raxNext(&ri)) {
         mstime_t reported_time;
         clusterNode *reported_node;
