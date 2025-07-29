@@ -1024,9 +1024,7 @@ void clusterUpdateMyselfFlags(void) {
     int nofailover = server.cluster_replica_no_failover ? CLUSTER_NODE_NOFAILOVER : 0;
     myself->flags &= ~CLUSTER_NODE_NOFAILOVER;
     myself->flags |= nofailover;
-    myself->flags |= CLUSTER_NODE_EXTENSIONS_SUPPORTED |
-                     CLUSTER_NODE_LIGHT_HDR_PUBLISH_SUPPORTED |
-                     CLUSTER_NODE_LIGHT_HDR_MODULE_SUPPORTED;
+    myself->flags |= CLUSTER_NODE_LIGHT_HDR_PUBLISH_SUPPORTED | CLUSTER_NODE_LIGHT_HDR_MODULE_SUPPORTED;
     if (myself->flags != oldflags) {
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG | CLUSTER_TODO_UPDATE_STATE);
     }
@@ -1496,7 +1494,6 @@ clusterLink *createClusterLink(clusterNode *node) {
     if (!link->inbound) {
         node->link = link;
     }
-    link->flags = 0;
     return link;
 }
 
@@ -3403,27 +3400,18 @@ int clusterProcessPacket(clusterLink *link) {
     int sender_last_reported_as_replica = sender && nodeIsReplica(sender);
     int sender_last_reported_as_primary = sender && nodeIsPrimary(sender);
 
-    /* We store this information at the link layer so that we can send extensions
-     * during the handshake even if we don't know the sender. */
-    if (hdr->mflags[0] & CLUSTERMSG_FLAG0_EXT_DATA) {
-        link->flags |= CLUSTER_LINK_EXTENSIONS_SUPPORTED;
+    if (sender && (hdr->mflags[0] & CLUSTERMSG_FLAG0_EXT_DATA)) {
+        sender->flags |= CLUSTER_NODE_EXTENSIONS_SUPPORTED;
     }
 
-    /* Store some flags about the sender. */
+    /* Checks if the node supports light message hdr */
     if (sender) {
-        /* Check if the node supports extensions. */
-        if (linkSupportsExtension(link)) {
-            sender->flags |= CLUSTER_NODE_EXTENSIONS_SUPPORTED;
-        }
-
-        /* Check if the node supports light publish message hdr */
         if (flags & CLUSTER_NODE_LIGHT_HDR_PUBLISH_SUPPORTED) {
             sender->flags |= CLUSTER_NODE_LIGHT_HDR_PUBLISH_SUPPORTED;
         } else {
             sender->flags &= ~CLUSTER_NODE_LIGHT_HDR_PUBLISH_SUPPORTED;
         }
 
-        /* Check if the node supports light module message hdr */
         if (flags & CLUSTER_NODE_LIGHT_HDR_MODULE_SUPPORTED) {
             sender->flags |= CLUSTER_NODE_LIGHT_HDR_MODULE_SUPPORTED;
         } else {
@@ -3524,14 +3512,13 @@ int clusterProcessPacket(clusterLink *link) {
                      * flags, replicaof pointer, and so forth, as this details will be
                      * resolved when we'll receive PONGs from the node. The exception
                      * to this is the flag that indicates extensions are supported, as
-                     * we want to propagate extensions support as part of the node flags
-                     * in the gossip section, so that we can send extension right away
-                     * in the future packet. */
+                     * we want to send extensions right away in the return PONG in order
+                     * to reduce the amount of time needed to stabilize the shard ID. */
                     clusterNode *node = createClusterNode(NULL, CLUSTER_NODE_HANDSHAKE);
                     memcpy(node->ip, ip, sizeof(ip));
                     getClientPortFromClusterMsg(hdr, &node->tls_port, &node->tcp_port);
                     node->cport = ntohs(hdr->cport);
-                    if (linkSupportsExtension(link)) {
+                    if (hdr->mflags[0] & CLUSTERMSG_FLAG0_EXT_DATA) {
                         node->flags |= CLUSTER_NODE_EXTENSIONS_SUPPORTED;
                     }
                     setClusterNodeToInboundClusterLink(node, link);
@@ -4361,9 +4348,7 @@ void clusterSendPing(clusterLink *link, int type) {
      * to put inside the packet. */
     estlen = sizeof(clusterMsg) - sizeof(union clusterMsgData);
     estlen += (sizeof(clusterMsgDataGossip) * (wanted + pfail_wanted));
-    /* If the link or the node indicates that it supports extensions, then we
-     * pass the extensions. */
-    if (linkSupportsExtension(link) || (link->node && nodeSupportsExtensions(link->node))) {
+    if (link->node && nodeSupportsExtensions(link->node)) {
         estlen += writePingExtensions(NULL, 0);
     }
     /* Note: clusterBuildMessageHdr() expects the buffer to be always at least
@@ -4439,7 +4424,7 @@ void clusterSendPing(clusterLink *link, int type) {
     /* Compute the actual total length and send! */
     uint32_t totlen = 0;
 
-    if (linkSupportsExtension(link) || (link->node && nodeSupportsExtensions(link->node))) {
+    if (link->node && nodeSupportsExtensions(link->node)) {
         totlen += writePingExtensions(hdr, gossipcount);
     } else {
         serverLog(LL_DEBUG, "Unable to send extensions data, however setting ext data flag to true");
