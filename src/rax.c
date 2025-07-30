@@ -1849,7 +1849,7 @@ void raxRecursiveShow(int level, int lpad, raxNode *n, FILE *out) {
     for (int i = 0; i < numchildren; i++) {
         if (numchildren > 1) {
             fprintf(out, "\n");
-            for (int j = 0; j < lpad; j++) putchar(' ');
+            for (int j = 0; j < lpad; j++) fputc(' ', out);
             fprintf(out, " `-(%02X) ", (unsigned char)n->data[i]);
         } else {
             fprintf(out, " -> ");
