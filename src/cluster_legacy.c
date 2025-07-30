@@ -1734,7 +1734,7 @@ int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
     raxStart(&ri, failing->fail_reports);
     raxSeek(&ri, "^", NULL, 0);
 
-    if (failing->fail_reports->numele > 300) {
+    if (failing->fail_reports->numele > 400) {
         serverLog(LL_NOTICE,
                   "==== RAX node debug ====  number of keys: %llu number of nodes: %llu",
                   failing->fail_reports->numele, failing->fail_reports->numnodes);
