@@ -1736,6 +1736,8 @@ int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
     const mstime_t bucketed_time = (now / SEC_IN_MS) * SEC_IN_MS + SEC_IN_MS;
     int is_new = 1;
 
+    if (nodeFailed(failing)) return 0;
+
     /* Look for any existing entry from this sender and remove it */
     raxIterator ri;
     raxStart(&ri, failing->fail_reports);
